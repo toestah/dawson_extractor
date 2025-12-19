@@ -19,7 +19,7 @@ from datetime import datetime
 class DAWSONExtractor:
     """Efficiently extracts court orders from DAWSON public API."""
 
-    BASE_URL = "https://public-api-blue.dawson.ustaxcourt.gov"
+    BASE_URL = "https://public-api-green.dawson.ustaxcourt.gov"
 
     def __init__(self, config: Dict):
         """
@@ -41,10 +41,28 @@ class DAWSONExtractor:
         # Statistics
         self.stats = {
             'orders_downloaded': 0,
+            'orders_skipped': 0,
             'api_calls': 0,
             'errors': 0,
             'start_time': datetime.now()
         }
+
+        # Track existing documents to avoid duplicates
+        self.existing_docs = self._scan_existing_documents()
+
+    def _scan_existing_documents(self) -> set:
+        """Scan output directory for already downloaded documents."""
+        existing = set()
+        for pdf_file in self.output_dir.glob("*.pdf"):
+            # Extract document_id from filename: {docket}_{document_id}_{date}.pdf
+            parts = pdf_file.stem.split('_')
+            if len(parts) >= 2:
+                # Document ID is the second part (UUID format)
+                doc_id = parts[1]
+                existing.add(doc_id)
+        if existing:
+            print(f"Found {len(existing)} existing documents in {self.output_dir}")
+        return existing
 
     def _rate_limit(self):
         """Implement rate limiting between API calls."""
@@ -70,6 +88,16 @@ class DAWSONExtractor:
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            # Try to get more detailed error message from response
+            error_detail = ""
+            try:
+                error_detail = f": {e.response.text}"
+            except:
+                pass
+            print(f"HTTP Error for {endpoint}: {e}{error_detail}")
+            self.stats['errors'] += 1
+            return None
         except requests.exceptions.RequestException as e:
             print(f"Error making request to {endpoint}: {e}")
             self.stats['errors'] += 1
@@ -161,7 +189,7 @@ class DAWSONExtractor:
         return orders
 
     def download_document(self, docket_number: str, document_id: str,
-                         metadata: Dict) -> bool:
+                         metadata: Dict) -> str:
         """
         Download a court order PDF.
 
@@ -171,15 +199,20 @@ class DAWSONExtractor:
             metadata: Document metadata for naming
 
         Returns:
-            True if successful, False otherwise
+            'downloaded' if successful, 'skipped' if already exists, 'error' if failed
         """
+        # Check if document already exists
+        if document_id in self.existing_docs:
+            self.stats['orders_skipped'] += 1
+            return 'skipped'
+
         # Get download URL
         endpoint = f"/public-api/{docket_number}/{document_id}/public-document-download-url"
         response = self._make_request(endpoint)
 
         if not response or 'url' not in response:
             print(f"Failed to get download URL for {docket_number}/{document_id}")
-            return False
+            return 'error'
 
         download_url = response['url']
 
@@ -202,29 +235,42 @@ class DAWSONExtractor:
             print(f"Downloaded: {filename}")
             self.stats['orders_downloaded'] += 1
 
+            # Add to existing docs set to prevent re-downloading in same session
+            self.existing_docs.add(document_id)
+
             # Save metadata
             metadata_file = filepath.with_suffix('.json')
             with open(metadata_file, 'w') as f:
                 json.dump(metadata, f, indent=2)
 
-            return True
+            return 'downloaded'
 
         except Exception as e:
             print(f"Error downloading document: {e}")
             self.stats['errors'] += 1
-            return False
+            return 'error'
 
     def extract_orders(self, num_orders: int):
         """
-        Main extraction process.
+        Main extraction process (incremental - skips existing documents).
 
         Args:
-            num_orders: Number of orders to download
+            num_orders: Total number of orders desired (will download delta)
         """
+        existing_count = len(self.existing_docs)
+        needed = max(0, num_orders - existing_count)
+
         print(f"\n=== DAWSON Court Order Extractor ===")
-        print(f"Target: {num_orders} court orders")
+        print(f"Target: {num_orders} total court orders")
+        print(f"Existing: {existing_count} documents")
+        print(f"To download: {needed} new documents")
         print(f"Output: {self.output_dir}")
         print(f"Rate limit: {self.config.get('rate_limit_delay', 1.0)}s between requests\n")
+
+        if needed == 0:
+            print("Already have enough documents. Nothing to download.")
+            self._print_summary()
+            return
 
         # Step 1: Search for orders
         search_keywords = self.config.get('search_keywords', ['order'])
@@ -250,7 +296,7 @@ class DAWSONExtractor:
         orders_collected = 0
         docket_index = 0
 
-        while orders_collected < num_orders and docket_index < len(unique_dockets):
+        while orders_collected < needed and docket_index < len(unique_dockets):
             docket = unique_dockets[docket_index]
             docket_index += 1
 
@@ -272,18 +318,20 @@ class DAWSONExtractor:
 
             # Download orders from this docket
             for order in orders:
-                if orders_collected >= num_orders:
+                if orders_collected >= needed:
                     break
 
-                success = self.download_document(
+                result = self.download_document(
                     order['docket_number'],
                     order['docket_entry_id'],
                     order
                 )
 
-                if success:
+                if result == 'downloaded':
                     orders_collected += 1
-                    print(f"  Progress: {orders_collected}/{num_orders}")
+                    print(f"  Progress: {orders_collected}/{needed} new downloads")
+                elif result == 'skipped':
+                    pass  # Already exists, silently skip
 
         # Print summary
         self._print_summary()
@@ -291,11 +339,14 @@ class DAWSONExtractor:
     def _print_summary(self):
         """Print extraction summary statistics."""
         duration = (datetime.now() - self.stats['start_time']).total_seconds()
+        total_docs = len(self.existing_docs)
 
         print("\n" + "="*50)
         print("EXTRACTION COMPLETE")
         print("="*50)
-        print(f"Orders downloaded: {self.stats['orders_downloaded']}")
+        print(f"New orders downloaded: {self.stats['orders_downloaded']}")
+        print(f"Orders skipped (already existed): {self.stats['orders_skipped']}")
+        print(f"Total documents in library: {total_docs}")
         print(f"Total API calls: {self.stats['api_calls']}")
         print(f"Errors: {self.stats['errors']}")
         print(f"Duration: {duration:.1f} seconds")
