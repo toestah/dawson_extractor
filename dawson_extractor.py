@@ -19,7 +19,7 @@ from datetime import datetime
 class DAWSONExtractor:
     """Efficiently extracts court orders from DAWSON public API."""
 
-    BASE_URL = "https://public-api-green.dawson.ustaxcourt.gov"
+    BASE_URL = "https://public-api-blue.dawson.ustaxcourt.gov"
 
     def __init__(self, config: Dict):
         """
