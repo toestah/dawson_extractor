@@ -22,10 +22,18 @@ Efficiently extracts court documents (orders, closings, dismissals, etc.) from t
 
 1. Clone or download this repository
 
-2. Install dependencies:
+2. Create a virtual environment and install dependencies:
 ```bash
-pip install -r requirements.txt
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
 ```
+
+3. Create your configuration file:
+```bash
+cp config.json.example config.json
+```
+
+4. Edit `config.json` to customize document types and other settings
 
 ## Usage
 
