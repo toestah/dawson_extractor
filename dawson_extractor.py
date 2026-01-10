@@ -105,15 +105,15 @@ class DAWSONExtractor:
 
     def search_orders(self, keyword: str = "order") -> List[str]:
         """
-        Search for court orders and return unique docket numbers.
+        Search for court documents and return unique docket numbers.
 
         Args:
-            keyword: Search keyword for orders
+            keyword: Search keyword for documents
 
         Returns:
             List of unique docket numbers
         """
-        print(f"Searching for orders with keyword: '{keyword}'...")
+        print(f"Searching for documents with keyword: '{keyword}'...")
 
         params = {
             "keyword": keyword,
@@ -123,19 +123,28 @@ class DAWSONExtractor:
         data = self._make_request("/public-api/order-search", params=params)
 
         if not data:
-            print("Failed to retrieve order search results")
+            print("Failed to retrieve search results")
             return []
 
         # Extract unique docket numbers from results
         docket_numbers = set()
         results = data.get('results', [])
 
+        # Get allowed document types from config
+        allowed_types = self.config.get('document_types', ['Order'])
+
         for item in results:
             docket_number = item.get('docketNumber')
-            if docket_number and item.get('documentType') == 'Order':
+            document_type = item.get('documentType', '')
+
+            # Check if document type matches any allowed type (case-insensitive substring match)
+            if docket_number and any(
+                doc_type.lower() in document_type.lower()
+                for doc_type in allowed_types
+            ):
                 docket_numbers.add(docket_number)
 
-        print(f"Found {len(docket_numbers)} unique dockets with orders")
+        print(f"Found {len(docket_numbers)} unique dockets with matching documents")
         return list(docket_numbers)
 
     def get_case_details(self, docket_number: str) -> Optional[Dict]:
@@ -152,33 +161,34 @@ class DAWSONExtractor:
 
     def filter_court_orders(self, case_data: Dict) -> List[Dict]:
         """
-        Filter docket entries for court orders that are PDFs.
+        Filter docket entries for configured document types.
 
         Args:
             case_data: Case details from API
 
         Returns:
-            List of court order entries
+            List of matching document entries
         """
-        orders = []
+        documents = []
+
+        # Get allowed document types from config
+        allowed_types = self.config.get('document_types', ['Order'])
 
         docket_entries = case_data.get('docketEntries', [])
         for entry in docket_entries:
-            # Check if it's an order and if there's a document
-            event_code = entry.get('eventCode', '')
             document_type = entry.get('documentType', '')
             is_sealed = entry.get('isSealed', False)
             document_id = entry.get('docketEntryId')
 
-            # Look for order-related document types
-            is_order = (
-                'order' in document_type.lower() or
-                'O' in event_code  # Order event codes often contain 'O'
+            # Check if document type matches any configured type (case-insensitive substring match)
+            matches_type = any(
+                doc_type.lower() in document_type.lower()
+                for doc_type in allowed_types
             )
 
-            # Only include public PDFs
-            if is_order and not is_sealed and document_id:
-                orders.append({
+            # Only include public documents that match configured types
+            if matches_type and not is_sealed and document_id:
+                documents.append({
                     'docket_number': case_data.get('docketNumber'),
                     'docket_entry_id': document_id,
                     'document_type': document_type,
@@ -186,7 +196,7 @@ class DAWSONExtractor:
                     'filed_date': entry.get('filingDate', 'Unknown')
                 })
 
-        return orders
+        return documents
 
     def download_document(self, docket_number: str, document_id: str,
                          metadata: Dict) -> str:
@@ -255,13 +265,14 @@ class DAWSONExtractor:
         Main extraction process (incremental - skips existing documents).
 
         Args:
-            num_orders: Total number of orders desired (will download delta)
+            num_orders: Total number of documents desired (will download delta)
         """
         existing_count = len(self.existing_docs)
         needed = max(0, num_orders - existing_count)
 
-        print(f"\n=== DAWSON Court Order Extractor ===")
-        print(f"Target: {num_orders} total court orders")
+        print(f"\n=== DAWSON Document Extractor ===")
+        print(f"Target: {num_orders} total documents")
+        print(f"Document types: {', '.join(self.config.get('document_types', ['Order']))}")
         print(f"Existing: {existing_count} documents")
         print(f"To download: {needed} new documents")
         print(f"Output: {self.output_dir}")
@@ -307,17 +318,17 @@ class DAWSONExtractor:
             if not case_data:
                 continue
 
-            # Filter for court orders
-            orders = self.filter_court_orders(case_data)
+            # Filter for configured document types
+            documents = self.filter_court_orders(case_data)
 
-            if not orders:
-                print(f"  No court orders found in docket {docket}")
+            if not documents:
+                print(f"  No matching documents found in docket {docket}")
                 continue
 
-            print(f"  Found {len(orders)} court order(s)")
+            print(f"  Found {len(documents)} matching document(s)")
 
-            # Download orders from this docket
-            for order in orders:
+            # Download documents from this docket
+            for order in documents:
                 if orders_collected >= needed:
                     break
 
@@ -344,8 +355,8 @@ class DAWSONExtractor:
         print("\n" + "="*50)
         print("EXTRACTION COMPLETE")
         print("="*50)
-        print(f"New orders downloaded: {self.stats['orders_downloaded']}")
-        print(f"Orders skipped (already existed): {self.stats['orders_skipped']}")
+        print(f"New documents downloaded: {self.stats['orders_downloaded']}")
+        print(f"Documents skipped (already existed): {self.stats['orders_skipped']}")
         print(f"Total documents in library: {total_docs}")
         print(f"Total API calls: {self.stats['api_calls']}")
         print(f"Errors: {self.stats['errors']}")
@@ -359,6 +370,7 @@ def load_config(config_file: str = 'config.json') -> Dict:
 
     default_config = {
         'num_orders': 10,
+        'document_types': ['Order'],
         'rate_limit_delay': 1.0,
         'output_dir': 'downloads',
         'search_keywords': ['order']
