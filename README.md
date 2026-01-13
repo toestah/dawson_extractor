@@ -179,4 +179,4 @@ Endpoints:
 
 ## License
 
-This tool is provided as-is for educational and research purposes.
+MIT License - free for all. See [LICENSE](LICENSE) for details.
