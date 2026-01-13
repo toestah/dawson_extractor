@@ -1,15 +1,21 @@
 {
   "num_orders": 10,
   "document_types": ["Order"],
+  "match_mode": "substring",
+  "min_per_type": 0,
+  "api_environment": "green",
   "rate_limit_delay": 1.0,
   "output_dir": "downloads",
   "search_keywords": ["order"],
   "_comment": "Configuration for DAWSON Document Extractor",
   "_settings": {
     "num_orders": "Number of documents to download (can be overridden via command line)",
-    "document_types": "List of document types to filter and download (e.g., ['Order'], ['closing', 'dismissal'])",
-    "rate_limit_delay": "Delay in seconds between API requests (increase to be more conservative)",
-    "output_dir": "Directory where PDFs and metadata will be saved",
-    "search_keywords": "Keywords to search for documents (should match document_types for best results)"
+    "document_types": "List of document types to filter (run --discover to see available types)",
+    "match_mode": "'substring' for partial matching (default), 'exact' for precise type matching",
+    "min_per_type": "Minimum documents per type (0 to disable). Ensures balanced extraction.",
+    "api_environment": "'green' (default) or 'blue' - switch if one API is down",
+    "rate_limit_delay": "Delay in seconds between API requests",
+    "output_dir": "Base directory where PDFs and metadata will be saved",
+    "search_keywords": "Keywords to search for documents (should match document_types)"
   }
 }

@@ -4,14 +4,14 @@ Efficiently extracts court documents (orders, closings, dismissals, etc.) from t
 
 ## Features
 
-- **Flexible Document Types**: Configure which document types to extract (orders, closings, dismissals, etc.)
-- **Efficient API Usage**: Built-in rate limiting to avoid overloading the DAWSON API
-- **Random Sampling**: Pulls documents from random dockets to ensure variety
-- **Configurable**: Easy-to-use configuration file for customization
-- **Metadata Tracking**: Saves metadata alongside each PDF for reference
-- **Progress Monitoring**: Real-time progress updates and summary statistics
-- **Error Handling**: Robust error handling with detailed logging
+- **Document Type Discovery**: Query the API to discover all available document types
+- **Exact or Substring Matching**: Choose precise type matching or flexible substring matching
+- **Minimum Per Type**: Ensure balanced extraction with minimum counts per document type
+- **API Environment Switching**: Seamlessly switch between blue/green API environments
 - **Incremental Downloads**: Automatically skips already downloaded documents
+- **Random Sampling**: Pulls documents from random dockets to ensure variety
+- **Rate Limiting**: Built-in delays to respect the DAWSON API
+- **Metadata Tracking**: Saves JSON metadata alongside each PDF
 
 ## Prerequisites
 
@@ -39,19 +39,27 @@ cp config.json.example config.json
 
 ### Basic Usage
 
-Run with default settings (configured in config.json):
 ```bash
+# Download documents using config.json settings
 ./venv/bin/python dawson_extractor.py
+
+# Download a specific number of documents
+./venv/bin/python dawson_extractor.py 50
 ```
 
-### Specify Number of Documents
+### Document Type Discovery
 
-Download a specific number of documents:
+Before downloading, discover what document types exist in DAWSON:
+
 ```bash
-./venv/bin/python dawson_extractor.py 25
+# Query API and catalog all document types
+./venv/bin/python dawson_extractor.py --discover
+
+# List discovered document types
+./venv/bin/python dawson_extractor.py --list-types
 ```
 
-This will download 25 documents of the types configured in config.json from random dockets.
+This creates `document_types_catalog.json` with all available types and their frequencies, enabling precise filtering with exact matching.
 
 ### Configuration
 
@@ -59,52 +67,69 @@ Edit `config.json` to customize behavior:
 
 ```json
 {
-  "num_orders": 500,
-  "document_types": ["closing", "dismissal"],
+  "num_orders": 100,
+  "document_types": [
+    "Order of Dismissal for Lack of Jurisdiction",
+    "Order and Decision",
+    "Order of Dismissal"
+  ],
+  "match_mode": "exact",
+  "min_per_type": 5,
+  "api_environment": "green",
   "rate_limit_delay": 1.0,
   "output_dir": "downloads",
-  "search_keywords": ["closing", "dismissal"]
+  "search_keywords": ["dismissal", "decision"]
 }
 ```
 
 **Configuration Options:**
 
-- `num_orders`: Default number of documents to download (can be overridden via command line)
-- `document_types`: List of document types to filter and download
-  - Examples: `["Order"]`, `["closing", "dismissal"]`, `["Order", "Decision"]`
-  - Uses case-insensitive substring matching (e.g., "closing" matches "Case Closing")
-- `rate_limit_delay`: Delay in seconds between API requests (default: 1.0)
-  - Increase this value to be more conservative (e.g., 2.0 for 2 seconds)
-  - Decrease for faster extraction (not recommended below 0.5)
-- `output_dir`: Directory where PDFs and metadata will be saved
-- `search_keywords`: List of keywords to search for documents via API
-  - Should generally match `document_types` for best results
-  - Examples: `["order"]`, `["closing", "dismissal"]`, `["decision"]`
+| Option | Description | Default |
+|--------|-------------|---------|
+| `num_orders` | Total documents to download (can override via CLI) | 10 |
+| `document_types` | List of document types to filter | `["Order"]` |
+| `match_mode` | `"exact"` for precise matching, `"substring"` for partial matching | `"substring"` |
+| `min_per_type` | Minimum documents required per type (0 to disable) | 0 |
+| `api_environment` | `"green"` or `"blue"` - switch if one is down | `"green"` |
+| `rate_limit_delay` | Seconds between API requests | 1.0 |
+| `output_dir` | Base directory for downloads | `"downloads"` |
+| `search_keywords` | Keywords for API search (should match document_types) | `["order"]` |
+
+### Matching Modes
+
+**Substring matching** (default): Flexible matching where "dismissal" matches "Order of Dismissal", "Order of Dismissal for Lack of Jurisdiction", etc.
+
+**Exact matching**: Precise matching using exact type names from the API. Run `--discover` first to see available types, then use exact names in `document_types`.
+
+### Minimum Per Type
+
+Set `min_per_type` to ensure balanced extraction. The tool will prioritize under-represented types until all minimums are met, then fill the remainder randomly.
+
+Example: With 4 document types and `min_per_type: 5`, the first 20 downloads will ensure at least 5 of each type.
 
 ## How It Works
 
-The extractor uses an efficient multi-step process:
-
-1. **Search Phase**: Searches for documents using the DAWSON public API order-search endpoint with configured keywords
-2. **Random Sampling**: Randomly shuffles docket numbers to ensure variety
-3. **Filtering**: For each docket, retrieves case details and filters for:
-   - Documents matching configured `document_types` (case-insensitive substring match)
-   - Public (not sealed) documents
-   - PDF format documents
-4. **Download**: Downloads the filtered documents with rate limiting
-5. **Metadata**: Saves JSON metadata alongside each PDF for reference
-6. **Incremental**: Automatically skips documents that were previously downloaded
+1. **Search Phase**: Queries the DAWSON order-search API with configured keywords
+2. **Random Sampling**: Shuffles docket numbers for variety
+3. **Filtering**: For each docket, filters for matching document types (public, unsealed)
+4. **Priority Download**: If `min_per_type` is set, prioritizes under-represented types
+5. **Download**: Fetches PDFs with rate limiting, saves metadata JSON alongside
+6. **Deduplication**: Skips documents already in any subfolder of output directory
 
 ## Output Structure
 
-Downloaded files are saved in the configured output directory:
+Each run creates a timestamped subfolder:
 
 ```
 downloads/
-├── 12345-20_docketEntryId_2024-01-15.pdf
-├── 12345-20_docketEntryId_2024-01-15.json
-├── 67890-21_docketEntryId_2024-02-20.pdf
-└── 67890-21_docketEntryId_2024-02-20.json
+├── order_of_dismissal_2024-01-15_143022/
+│   ├── 12345-20_uuid_2024-01-15.pdf
+│   ├── 12345-20_uuid_2024-01-15.json
+│   └── ...
+└── order_and_decision_2024-01-16_091500/
+    ├── 67890-21_uuid_2024-02-20.pdf
+    ├── 67890-21_uuid_2024-02-20.json
+    └── ...
 ```
 
 Each PDF has an accompanying JSON file with metadata:
@@ -113,84 +138,37 @@ Each PDF has an accompanying JSON file with metadata:
 - Filed date
 - Description
 
-## Rate Limiting & API Etiquette
+## API Endpoints
 
-This tool implements rate limiting to be respectful of the DAWSON public API:
+The tool uses two API environments (configurable via `api_environment`):
+- `https://public-api-green.dawson.ustaxcourt.gov` (default)
+- `https://public-api-blue.dawson.ustaxcourt.gov`
 
-- Default delay: 1 second between API requests
-- Configurable via `rate_limit_delay` in config.json
-- Uses persistent session for connection pooling efficiency
-- Includes proper User-Agent header
-
-**Recommendations:**
-- For large extractions (100+ documents), consider increasing `rate_limit_delay` to 2.0 seconds
-- Run during off-peak hours if extracting significant amounts of data
-- Monitor for any API errors and adjust delay if needed
-
-## Statistics & Monitoring
-
-The tool provides real-time feedback:
-- Progress indicators showing current docket and document count
-- Document types being searched for
-- Summary statistics at completion:
-  - New documents downloaded
-  - Documents skipped (already existed)
-  - Total documents in library
-  - Total API calls made
-  - Error count
-  - Total duration
-  - Output directory location
-
-## Error Handling
-
-The tool gracefully handles common errors:
-- Network timeouts
-- Missing documents
-- Sealed or restricted documents
-- Invalid docket numbers
-- API rate limit errors
-
-Errors are logged but don't stop the extraction process.
-
-## API Endpoints Used
-
-This tool uses the following DAWSON public API endpoints:
-
-- `GET /public-api/order-search` - Search for court orders
+Endpoints:
+- `GET /public-api/order-search` - Search for court documents
 - `GET /public-api/cases/{docketNumber}` - Retrieve case details
-- `GET /public-api/{docketNumber}/{key}/public-document-download-url` - Get document download URL
-
-## Limitations
-
-- Only accesses **public** documents (sealed documents are filtered out)
-- Requires documents to be properly classified in the system
-- Subject to DAWSON API availability and rate limits
-- Does not authenticate, so only public data is accessible
+- `GET /public-api/{docketNumber}/{key}/public-document-download-url` - Get download URL
 
 ## Troubleshooting
 
 **No documents found:**
-- Try different search keywords in `config.json`
-- Verify your `document_types` match actual document type names in DAWSON
-- Check if the DAWSON API is accessible: https://public-api-blue.dawson.ustaxcourt.gov or https://public-api-green.dawson.ustaxcourt.gov
-- Try switching between blue/green API environments in dawson_extractor.py if one is down
+- Run `--discover` to see available document types
+- Use exact type names with `match_mode: "exact"`
+- Try switching `api_environment` between "green" and "blue"
+
+**API errors (500):**
+- One API environment may be down for deployment
+- Switch `api_environment` in config.json
 
 **Too many errors:**
-- Increase `rate_limit_delay` in config.json
+- Increase `rate_limit_delay` to 2.0 or higher
 - Check internet connection
-- Verify DAWSON API status
-
-**Slow downloads:**
-- This is expected with rate limiting enabled
-- Decrease `rate_limit_delay` at your own risk
-- Consider running overnight for large extractions
 
 ## Legal & Ethical Considerations
 
 - This tool only accesses **public** court records
-- Be respectful of the DAWSON system and implement appropriate rate limiting
+- Be respectful of the DAWSON system with appropriate rate limiting
 - Intended for research, educational, and legitimate legal purposes
-- Follow all applicable laws and terms of service
 - The DAWSON system is operated by the U.S. Tax Court
 
 ## Resources
@@ -202,18 +180,3 @@ This tool uses the following DAWSON public API endpoints:
 ## License
 
 This tool is provided as-is for educational and research purposes.
-
-## Contributing
-
-Contributions are welcome! Please ensure any modifications maintain:
-- Proper rate limiting
-- Error handling
-- Clear documentation
-- Respectful API usage
-
-## Support
-
-For issues with:
-- This extractor tool: Open an issue in this repository
-- DAWSON system itself: Contact dawson.support@ustaxcourt.gov
-- DAWSON API: See https://github.com/ustaxcourt/ef-cms

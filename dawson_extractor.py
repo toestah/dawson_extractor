@@ -19,7 +19,10 @@ from datetime import datetime
 class DAWSONExtractor:
     """Efficiently extracts court orders from DAWSON public API."""
 
-    BASE_URL = "https://public-api-blue.dawson.ustaxcourt.gov"
+    API_ENVIRONMENTS = {
+        'blue': "https://public-api-blue.dawson.ustaxcourt.gov",
+        'green': "https://public-api-green.dawson.ustaxcourt.gov"
+    }
 
     def __init__(self, config: Dict):
         """
@@ -34,8 +37,22 @@ class DAWSONExtractor:
             'User-Agent': 'DAWSON-Extractor/1.0 (Educational/Research)'
         })
 
-        # Create output directory
-        self.output_dir = Path(config.get('output_dir', 'downloads'))
+        # Set API environment (blue or green)
+        api_env = config.get('api_environment', 'green')
+        self.base_url = self.API_ENVIRONMENTS.get(api_env, self.API_ENVIRONMENTS['green'])
+
+        # Create output directory with run-specific subfolder
+        base_output_dir = Path(config.get('output_dir', 'downloads'))
+        base_output_dir.mkdir(exist_ok=True)
+
+        # Create subfolder named with document types and timestamp
+        doc_types = config.get('document_types', ['Order'])
+        types_str = '_'.join(t.lower() for t in doc_types)
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
+        run_folder_name = f"{types_str}_{timestamp}"
+
+        self.base_output_dir = base_output_dir
+        self.output_dir = base_output_dir / run_folder_name
         self.output_dir.mkdir(exist_ok=True)
 
         # Statistics
@@ -51,9 +68,10 @@ class DAWSONExtractor:
         self.existing_docs = self._scan_existing_documents()
 
     def _scan_existing_documents(self) -> set:
-        """Scan output directory for already downloaded documents."""
+        """Scan all subfolders in base output directory for already downloaded documents."""
         existing = set()
-        for pdf_file in self.output_dir.glob("*.pdf"):
+        # Scan all subfolders and root for existing PDFs
+        for pdf_file in self.base_output_dir.glob("**/*.pdf"):
             # Extract document_id from filename: {docket}_{document_id}_{date}.pdf
             parts = pdf_file.stem.split('_')
             if len(parts) >= 2:
@@ -61,7 +79,7 @@ class DAWSONExtractor:
                 doc_id = parts[1]
                 existing.add(doc_id)
         if existing:
-            print(f"Found {len(existing)} existing documents in {self.output_dir}")
+            print(f"Found {len(existing)} existing documents in {self.base_output_dir}")
         return existing
 
     def _rate_limit(self):
@@ -80,7 +98,7 @@ class DAWSONExtractor:
         Returns:
             JSON response or None if error
         """
-        url = f"{self.BASE_URL}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         self.stats['api_calls'] += 1
 
         try:
@@ -137,11 +155,8 @@ class DAWSONExtractor:
             docket_number = item.get('docketNumber')
             document_type = item.get('documentType', '')
 
-            # Check if document type matches any allowed type (case-insensitive substring match)
-            if docket_number and any(
-                doc_type.lower() in document_type.lower()
-                for doc_type in allowed_types
-            ):
+            # Check if document type matches
+            if docket_number and self._matches_document_type(document_type, allowed_types):
                 docket_numbers.add(docket_number)
 
         print(f"Found {len(docket_numbers)} unique dockets with matching documents")
@@ -158,6 +173,30 @@ class DAWSONExtractor:
             Case details or None if error
         """
         return self._make_request(f"/public-api/cases/{docket_number}")
+
+    def _matches_document_type(self, document_type: str, allowed_types: List[str]) -> bool:
+        """
+        Check if a document type matches the allowed types.
+
+        Args:
+            document_type: The document type to check
+            allowed_types: List of allowed type patterns
+
+        Returns:
+            True if document_type matches any allowed type
+        """
+        match_mode = self.config.get('match_mode', 'substring')
+
+        if match_mode == 'exact':
+            return any(
+                doc_type.lower() == document_type.lower()
+                for doc_type in allowed_types
+            )
+        else:  # substring (default)
+            return any(
+                doc_type.lower() in document_type.lower()
+                for doc_type in allowed_types
+            )
 
     def filter_court_orders(self, case_data: Dict) -> List[Dict]:
         """
@@ -180,11 +219,8 @@ class DAWSONExtractor:
             is_sealed = entry.get('isSealed', False)
             document_id = entry.get('docketEntryId')
 
-            # Check if document type matches any configured type (case-insensitive substring match)
-            matches_type = any(
-                doc_type.lower() in document_type.lower()
-                for doc_type in allowed_types
-            )
+            # Check if document type matches
+            matches_type = self._matches_document_type(document_type, allowed_types)
 
             # Only include public documents that match configured types
             if matches_type and not is_sealed and document_id:
@@ -269,10 +305,17 @@ class DAWSONExtractor:
         """
         existing_count = len(self.existing_docs)
         needed = max(0, num_orders - existing_count)
+        min_per_type = self.config.get('min_per_type', 0)
+        document_types = self.config.get('document_types', ['Order'])
+
+        # Track counts per document type
+        type_counts = {doc_type: 0 for doc_type in document_types}
 
         print(f"\n=== DAWSON Document Extractor ===")
         print(f"Target: {num_orders} total documents")
-        print(f"Document types: {', '.join(self.config.get('document_types', ['Order']))}")
+        print(f"Document types: {', '.join(document_types)}")
+        if min_per_type > 0:
+            print(f"Minimum per type: {min_per_type}")
         print(f"Existing: {existing_count} documents")
         print(f"To download: {needed} new documents")
         print(f"Output: {self.output_dir}")
@@ -307,6 +350,22 @@ class DAWSONExtractor:
         orders_collected = 0
         docket_index = 0
 
+        def needs_type(doc_type: str) -> bool:
+            """Check if we still need more of this document type."""
+            if min_per_type <= 0:
+                return True
+            # Find matching configured type (case-insensitive)
+            for configured_type in document_types:
+                if configured_type.lower() == doc_type.lower():
+                    return type_counts.get(configured_type, 0) < min_per_type
+            return True
+
+        def all_minimums_met() -> bool:
+            """Check if all document types have met their minimums."""
+            if min_per_type <= 0:
+                return True
+            return all(count >= min_per_type for count in type_counts.values())
+
         while orders_collected < needed and docket_index < len(unique_dockets):
             docket = unique_dockets[docket_index]
             docket_index += 1
@@ -325,12 +384,22 @@ class DAWSONExtractor:
                 print(f"  No matching documents found in docket {docket}")
                 continue
 
+            # If minimums not met, prioritize under-represented types
+            if not all_minimums_met():
+                documents = [doc for doc in documents if needs_type(doc['document_type'])]
+                if not documents:
+                    continue
+
             print(f"  Found {len(documents)} matching document(s)")
 
             # Download documents from this docket
             for order in documents:
                 if orders_collected >= needed:
                     break
+
+                # Skip if we don't need this type anymore (when filling minimums)
+                if not all_minimums_met() and not needs_type(order['document_type']):
+                    continue
 
                 result = self.download_document(
                     order['docket_number'],
@@ -340,14 +409,19 @@ class DAWSONExtractor:
 
                 if result == 'downloaded':
                     orders_collected += 1
+                    # Track type counts
+                    for configured_type in document_types:
+                        if configured_type.lower() == order['document_type'].lower():
+                            type_counts[configured_type] = type_counts.get(configured_type, 0) + 1
+                            break
                     print(f"  Progress: {orders_collected}/{needed} new downloads")
                 elif result == 'skipped':
                     pass  # Already exists, silently skip
 
-        # Print summary
-        self._print_summary()
+        # Print summary with type breakdown
+        self._print_summary(type_counts)
 
-    def _print_summary(self):
+    def _print_summary(self, type_counts: Optional[Dict[str, int]] = None):
         """Print extraction summary statistics."""
         duration = (datetime.now() - self.stats['start_time']).total_seconds()
         total_docs = len(self.existing_docs)
@@ -358,11 +432,101 @@ class DAWSONExtractor:
         print(f"New documents downloaded: {self.stats['orders_downloaded']}")
         print(f"Documents skipped (already existed): {self.stats['orders_skipped']}")
         print(f"Total documents in library: {total_docs}")
+        if type_counts:
+            print(f"\nDownloaded by type:")
+            for doc_type, count in type_counts.items():
+                print(f"  {count:4d}  {doc_type}")
         print(f"Total API calls: {self.stats['api_calls']}")
         print(f"Errors: {self.stats['errors']}")
         print(f"Duration: {duration:.1f} seconds")
         print(f"Output directory: {self.output_dir.absolute()}")
         print("="*50)
+
+    def discover_document_types(self) -> Dict[str, int]:
+        """
+        Query API with broad searches to discover all document types.
+
+        Returns:
+            Dict mapping document type names to occurrence counts
+        """
+        print("\n=== DAWSON Document Type Discovery ===\n")
+
+        # Keywords to search - covers major document categories
+        discovery_keywords = [
+            "order", "motion", "decision", "opinion", "petition",
+            "dismissal", "closing", "brief", "memorandum", "notice",
+            "stipulation", "response", "reply", "objection", "report"
+        ]
+
+        type_counts: Dict[str, int] = {}
+
+        for keyword in discovery_keywords:
+            print(f"Searching with keyword: '{keyword}'...")
+
+            params = {
+                "keyword": keyword,
+                "dateRange": "allDates",
+                "limit": 5000
+            }
+            data = self._make_request("/public-api/order-search", params=params)
+
+            if not data:
+                continue
+
+            results = data.get('results', [])
+            for item in results:
+                doc_type = item.get('documentType', '')
+                if doc_type:
+                    type_counts[doc_type] = type_counts.get(doc_type, 0) + 1
+
+        # Save catalog
+        catalog = {
+            "discovered_at": datetime.now().isoformat(),
+            "total_types": len(type_counts),
+            "types": dict(sorted(type_counts.items(), key=lambda x: -x[1]))
+        }
+
+        catalog_path = Path("document_types_catalog.json")
+        with open(catalog_path, 'w') as f:
+            json.dump(catalog, f, indent=2)
+
+        print(f"\n{'='*50}")
+        print(f"DISCOVERY COMPLETE")
+        print(f"{'='*50}")
+        print(f"Document types found: {len(type_counts)}")
+        print(f"Catalog saved to: {catalog_path.absolute()}")
+        print(f"Total API calls: {self.stats['api_calls']}")
+        print(f"\nTop 10 document types:")
+        for doc_type, count in list(catalog['types'].items())[:10]:
+            print(f"  {count:5d}  {doc_type}")
+        print(f"{'='*50}")
+
+        return type_counts
+
+    def list_document_types(self):
+        """Display discovered document types from catalog."""
+        catalog_path = Path("document_types_catalog.json")
+
+        if not catalog_path.exists():
+            print("No document type catalog found.")
+            print("Run with --discover first to catalog document types from the API.")
+            return
+
+        with open(catalog_path, 'r') as f:
+            catalog = json.load(f)
+
+        print(f"\n=== DAWSON Document Types ===")
+        print(f"Discovered: {catalog.get('discovered_at', 'Unknown')}")
+        print(f"Total types: {catalog.get('total_types', 0)}")
+        print(f"\n{'Count':>6}  Type")
+        print("-" * 50)
+
+        for doc_type, count in catalog.get('types', {}).items():
+            print(f"{count:6d}  {doc_type}")
+
+        print("-" * 50)
+        print("\nTo use exact matching, add types to config.json document_types list")
+        print("and set match_mode to 'exact'.")
 
 
 def load_config(config_file: str = 'config.json') -> Dict:
@@ -371,6 +535,8 @@ def load_config(config_file: str = 'config.json') -> Dict:
     default_config = {
         'num_orders': 10,
         'document_types': ['Order'],
+        'match_mode': 'substring',
+        'api_environment': 'green',
         'rate_limit_delay': 1.0,
         'output_dir': 'downloads',
         'search_keywords': ['order']
@@ -393,22 +559,45 @@ def load_config(config_file: str = 'config.json') -> Dict:
 
 def main():
     """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='DAWSON Court Document Extractor',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s                  Download documents using config.json settings
+  %(prog)s 25               Download 25 documents
+  %(prog)s --discover       Discover and catalog all document types from API
+  %(prog)s --list-types     List all discovered document types
+        '''
+    )
+    parser.add_argument('num_orders', nargs='?', type=int,
+                        help='Number of documents to download (overrides config)')
+    parser.add_argument('--discover', action='store_true',
+                        help='Discover document types from API and save to catalog')
+    parser.add_argument('--list-types', action='store_true',
+                        help='List all discovered document types')
+
+    args = parser.parse_args()
+
     # Load configuration
     config = load_config()
 
-    # Allow command-line override of num_orders
-    import sys
-    if len(sys.argv) > 1:
-        try:
-            config['num_orders'] = int(sys.argv[1])
-        except ValueError:
-            print(f"Invalid number: {sys.argv[1]}")
-            print("Usage: python dawson_extractor.py [num_orders]")
-            sys.exit(1)
+    # Override num_orders if provided
+    if args.num_orders is not None:
+        config['num_orders'] = args.num_orders
 
-    # Create extractor and run
+    # Create extractor
     extractor = DAWSONExtractor(config)
-    extractor.extract_orders(config['num_orders'])
+
+    # Handle different modes
+    if args.discover:
+        extractor.discover_document_types()
+    elif args.list_types:
+        extractor.list_document_types()
+    else:
+        extractor.extract_orders(config['num_orders'])
 
 
 if __name__ == '__main__':
