@@ -1,0 +1,51 @@
+DAWSON EXTRACTOR - STOP/RESUME INSTRUCTIONS
+============================================
+
+HOW DEDUPLICATION WORKS
+-----------------------
+On startup, the extractor scans all existing PDFs in the downloads/ directory,
+extracts document IDs (UUIDs) from filenames, and skips any already-downloaded
+documents. This means you can safely stop and restart at any time.
+
+
+STOPPING THE EXTRACTOR
+----------------------
+Find the process ID:
+  ps aux | grep dawson_extractor
+
+Stop it gracefully:
+  kill -INT <PID>
+
+
+RESUMING LATER
+--------------
+Just run the same command again:
+  cd /home/taimur/Projects/dawson_extractor
+  ./venv/bin/python dawson_extractor.py
+
+It will print "Found X existing documents..." and only download new ones.
+
+
+CLEANUP: FIX INCOMPLETE DOWNLOADS
+---------------------------------
+If the process was interrupted mid-download, you may have partial PDFs without
+their companion .json metadata files. Run this to find and remove them:
+
+  cd /home/taimur/Projects/dawson_extractor/downloads
+  find . -name "*.pdf" | while read pdf; do
+    json="${pdf%.pdf}.json"
+    if [ ! -f "$json" ]; then
+      echo "Removing orphan: $pdf"
+      rm "$pdf"
+    fi
+  done
+
+The extractor will re-download those files on the next run.
+
+
+CONFIGURATION
+-------------
+Edit config.json to change:
+  - num_orders: target number of documents to download
+  - document_types: which document types to fetch
+  - rate_limit_delay: seconds between API requests (default 0.5)

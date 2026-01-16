@@ -47,9 +47,14 @@ class DAWSONExtractor:
 
         # Create subfolder named with document types and timestamp
         doc_types = config.get('document_types', ['Order'])
-        types_str = '_'.join(t.lower() for t in doc_types)
         timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-        run_folder_name = f"{types_str}_{timestamp}"
+
+        # Use shorter name if too many types (avoid filesystem name length limits)
+        if len(doc_types) > 5:
+            run_folder_name = f"batch_{len(doc_types)}_types_{timestamp}"
+        else:
+            types_str = '_'.join(t.lower().replace(' ', '_') for t in doc_types)
+            run_folder_name = f"{types_str}_{timestamp}"
 
         self.base_output_dir = base_output_dir
         self.output_dir = base_output_dir / run_folder_name
